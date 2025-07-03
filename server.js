@@ -1,27 +1,33 @@
 const express = require('express');
 const admin = require('firebase-admin');
 
-// --- Firebase Admin SDK Initialization ---
+// --- Firebase Admin SDK Initialization from Environment Variable ---
+// This is the correct way to initialize for a production server like Render.
 try {
-  const serviceAccount = require('./gilfinnas-firebase-adminsdk-fbsvc-808c9ec17b.json'); 
+  // Render automatically provides the environment variable content as a string.
+  // We need to parse it into a JSON object.
+  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT); 
+
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount)
   });
 } catch (error) {
-  console.error("שגיאה: לא ניתן היה למצוא את קובץ המפתח של Firebase. ודא שהקובץ נמצא בתיקייה הנכונה וששמו נכון בקוד.");
+  console.error("שגיאה קריטית: לא ניתן היה לפענח את מפתח הגישה של Firebase.", error);
+  console.error("ודא שהגדרת משתנה סביבה בשם FIREBASE_SERVICE_ACCOUNT ב-Render עם כל התוכן של קובץ ה-JSON.");
   process.exit(1);
 }
 
 const db = admin.firestore();
 const app = express();
 const PORT = process.env.PORT || 3000;
-const API_KEY = "YOUR_SUPER_SECRET_API_KEY"; // You should set this in Render's Environment Variables
+// Read the API_KEY from the environment variable set in Render
+const API_KEY = process.env.API_KEY || "YOUR_SUPER_SECRET_API_KEY_FALLBACK"; 
 
 // --- CORS Middleware for Production ---
-// This allows your frontend apps to access this server
 const allowedOrigins = [
     'https://dashboard-frontend-five-azure.vercel.app', // Your Vercel Dashboard
-    'https://gilfinnas.com' // Your main site
+    'https://gilfinnas.com', // Your main site
+    'https://www.gilfinnas.com'
 ];
 app.use((req, res, next) => {
     const origin = req.headers.origin;
@@ -52,7 +58,6 @@ const getDashboardDataForUser = async (userId) => {
   }
   
   const userData = doc.data();
-  // This assumes the user document contains an array called 'transactions'.
   const transactions = userData.transactions || []; 
 
   if (!Array.isArray(transactions)) {
