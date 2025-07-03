@@ -15,13 +15,21 @@ try {
 const db = admin.firestore();
 const app = express();
 const PORT = process.env.PORT || 3000;
-const API_KEY = "YOUR_SUPER_SECRET_API_KEY"; 
+const API_KEY = "YOUR_SUPER_SECRET_API_KEY"; // You should set this in Render's Environment Variables
 
-// --- CORS Middleware ---
+// --- CORS Middleware for Production ---
+// This allows your frontend apps to access this server
+const allowedOrigins = [
+    'https://dashboard-frontend-five-azure.vercel.app', // Your Vercel Dashboard
+    'https://gilfinnas.com' // Your main site
+];
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, x-api-key');
-  next();
+    const origin = req.headers.origin;
+    if (allowedOrigins.includes(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+    }
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, x-api-key');
+    next();
 });
 
 // --- Middleware for API Key Authentication ---
@@ -40,7 +48,7 @@ const getDashboardDataForUser = async (userId) => {
   const doc = await userDocRef.get();
 
   if (!doc.exists) {
-    throw new Error(`User with ID '${userId}' not found in collection '${collectionName}'`);
+    throw new Error(`User with ID '${userId}' not found`);
   }
   
   const userData = doc.data();
@@ -68,39 +76,20 @@ const getDashboardDataForUser = async (userId) => {
   
   // The following data is still mocked. You would calculate this based on the user's transactions.
   return {
-    mainMetrics: {
-      totalRevenue: totalRevenue,
-      revenueChange: 15.2,
-      activeUsers: transactions.length,
-      usersChange: -1.5,
-      avgMonthlyRevenue: 41300,
-      avgChange: 4.8,
-    },
-    monthlyRevenueData: [
-      { name: 'ינו׳', revenue: 32000 }, { name: 'פבר׳', revenue: 41000 },
-    ],
-    revenueByCategoryData: [
-      { name: 'שירותים', value: 450, color: '#0ea5e9' }, { name: 'מוצרים', value: 250, color: '#8b5cf6' },
-    ],
+    mainMetrics: { totalRevenue, revenueChange: 15.2, activeUsers: transactions.length, usersChange: -1.5, avgMonthlyRevenue: 41300, avgChange: 4.8 },
+    monthlyRevenueData: [ { name: 'ינו׳', revenue: 32000 }, { name: 'פבר׳', revenue: 41000 } ],
+    revenueByCategoryData: [ { name: 'שירותים', value: 450, color: '#0ea5e9' }, { name: 'מוצרים', value: 250, color: '#8b5cf6' } ],
     recentTransactions: recentTransactions.slice(-5).reverse(),
   };
 };
 
 // --- API Routes ---
-app.get('/', (req, res) => {
-  res.send('Cash Flow API Server is running. Use /api/dashboard/:userId to get data.');
-});
-
 app.get('/api/dashboard/:userId', authenticateApiKey, async (req, res) => {
   try {
-    const userId = req.params.userId;
-    if (!userId) {
-      return res.status(400).json({ error: 'User ID is required.' });
-    }
+    const { userId } = req.params;
     const data = await getDashboardDataForUser(userId);
     res.json(data);
   } catch (error) {
-    console.error("Error fetching dashboard data:", error);
     res.status(500).json({ error: error.message });
   }
 });
