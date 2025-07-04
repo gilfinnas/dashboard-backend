@@ -1,127 +1,150 @@
-const express = require("express")
-const admin = require("firebase-admin")
+const express = require("express");
+const admin = require("firebase-admin");
 
-// --- Firebase Admin SDK Initialization from Environment Variable ---
+// --- Firebase Admin SDK Initialization ---
 try {
-  // Render automatically provides the environment variable content as a string.
-  // We need to parse it into a JSON object.
-  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
-
+  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
-  })
-  console.log("Firebase Admin SDK initialized successfully.");
+  });
+  console.log("Firebase Admin SDK initialized successfully for project:", serviceAccount.project_id);
 } catch (error) {
-  console.error("CRITICAL ERROR: Could not parse Firebase service account JSON.", error)
-  console.error("Please ensure the FIREBASE_SERVICE_ACCOUNT environment variable in Render is set correctly with the full JSON content.")
-  process.exit(1)
+  console.error("CRITICAL ERROR: Could not initialize Firebase service account.", error);
+  process.exit(1);
 }
 
-const db = admin.firestore()
-const app = express()
-const PORT = process.env.PORT || 3000
-const API_KEY = process.env.API_KEY
+const db = admin.firestore();
+const app = express();
+const PORT = process.env.PORT || 3000;
+const API_KEY = process.env.API_KEY;
 
-// --- CORS Middleware for Production ---
+// --- CORS Middleware ---
 const allowedOrigins = [
-  "https://dashboard-frontend-five-azure.vercel.app", // Your Vercel Dashboard
-  "https://gilfinnas.com", // Your main site
+  "https://dashboard-frontend-five-azure.vercel.app",
+  "https://gilfinnas.com",
   "https://www.gilfinnas.com",
-]
+];
 app.use((req, res, next) => {
-  const origin = req.headers.origin
+  const origin = req.headers.origin;
   if (allowedOrigins.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin)
+    res.setHeader("Access-Control-Allow-Origin", origin);
   }
-  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, x-api-key")
-  next()
-})
+  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, x-api-key");
+  next();
+});
 
-// --- Middleware for API Key Authentication ---
+// --- API Key Authentication Middleware ---
 const authenticateApiKey = (req, res, next) => {
-  const apiKey = req.header("x-api-key")
-  if (!apiKey || apiKey !== API_KEY) {
-    console.error("Forbidden: Invalid API key received:", apiKey)
-    return res.status(403).json({ error: "Forbidden: Invalid API key." })
+  const receivedApiKey = req.header("x-api-key");
+  if (!API_KEY) {
+    console.warn("SECURITY WARNING: API_KEY is not set.");
+    return next();
   }
-  next()
-}
+  if (!receivedApiKey || receivedApiKey !== API_KEY) {
+    console.error(`Forbidden: Invalid API key received.`);
+    return res.status(403).json({ error: "Forbidden: Invalid API key." });
+  }
+  next();
+};
 
-// --- Real Data Source from Firestore (for a SPECIFIC user) ---
+// --- Data Processing Function (with REAL data) ---
 const getDashboardDataForUser = async (userId) => {
-  // --- START OF CHANGES: Added detailed logging for Firestore access ---
-  console.log(`Attempting to fetch data for userId: ${userId}`);
+  console.log(`Fetching data for userId: ${userId}`);
   const userDocRef = db.collection("users").doc(userId);
-  
-  let doc;
-  try {
-    doc = await userDocRef.get();
-    console.log(`Firestore 'get' operation completed for userId: ${userId}`);
-  } catch (firestoreError) {
-    console.error(`Firestore Error when trying to get document for userId: ${userId}`, firestoreError);
-    // This error often indicates a problem with permissions (Security Rules) or connectivity.
-    throw new Error(`Could not access database. Check server permissions and connectivity. Original error: ${firestoreError.message}`);
-  }
-  // --- END OF CHANGES ---
+  const doc = await userDocRef.get();
 
   if (!doc.exists) {
-    console.error(`User document not found for userId: ${userId}`);
-    // Throw a specific error for "not found"
-    throw new Error(`User with ID '${userId}' not found in the database.`);
+    throw new Error(`User with ID '${userId}' not found.`);
   }
 
-  console.log(`Document found for userId: ${userId}. Processing data...`);
+  console.log(`Processing data for user: ${userId}`);
   const userData = doc.data();
-  // Use 'transactions' from userData, but default to an empty array if it doesn't exist
-  const transactions = userData.transactions || [];
-
-  if (!Array.isArray(transactions)) {
-    console.error(`The 'transactions' field for user '${userId}' is not an array. Type is: ${typeof transactions}`);
-    throw new Error(`Data format error: The 'transactions' field for user '${userId}' is not an array.`);
-  }
+  const yearsData = userData.years || {};
 
   let totalRevenue = 0;
+  const monthlyRevenue = {}; // "2025-07": 12000
+  const revenueByCategory = {}; // "מכירות (אשראי)": 5000
   const recentTransactions = [];
+  let transactionCount = 0;
 
-  transactions.forEach((transaction, index) => {
-    // Ensure the transaction and its amount are valid before processing
-    if (transaction && typeof transaction.amount === 'number' && transaction.amount > 0) {
-      totalRevenue += transaction.amount;
+  const monthNames = ["ינו׳", "פבר׳", "מרץ", "אפר׳", "מאי", "יוני", "יולי", "אוג׳", "ספט׳", "אוק׳", "נוב׳", "דצמ׳"];
+
+  // Loop through all years, months, and categories to aggregate data
+  for (const year in yearsData) {
+    for (const monthIndex in yearsData[year]) {
+      const monthData = yearsData[year][monthIndex];
+      const categories = monthData.categories || {};
+      const customNames = monthData.customNames || {};
+      
+      const monthKey = `${year}-${monthNames[monthIndex]}`;
+      monthlyRevenue[monthKey] = 0;
+
+      for (const catKey in categories) {
+        // We consider "income" type categories as revenue
+        if (catKey.includes("sales") || catKey.includes("exempt")) {
+          const dailyValues = categories[catKey] || [];
+          const categorySum = dailyValues.reduce((sum, value) => sum + (Number(value) || 0), 0);
+
+          if (categorySum > 0) {
+            totalRevenue += categorySum;
+            monthlyRevenue[monthKey] += categorySum;
+
+            // Aggregate by category name
+            const categoryName = customNames[catKey] || catKey.replace(/_/g, " ");
+            revenueByCategory[categoryName] = (revenueByCategory[categoryName] || 0) + categorySum;
+            
+            // Create recent transactions from daily values
+            dailyValues.forEach((value, day) => {
+                if (Number(value) > 0) {
+                    transactionCount++;
+                    recentTransactions.push({
+                        id: `${year}-${monthIndex}-${day}-${catKey}`,
+                        company: `הכנסה מ-${categoryName}`,
+                        amount: Number(value),
+                        type: "inflow",
+                    });
+                }
+            });
+          }
+        }
+      }
+      // If a month had no revenue, remove it
+      if (monthlyRevenue[monthKey] === 0) {
+        delete monthlyRevenue[monthKey];
+      }
     }
-    recentTransactions.push({
-      id: transaction.id || `tx_${index}`,
-      company: transaction.description || "Unknown Company",
-      amount: transaction.amount || 0,
-      type: (transaction.amount || 0) >= 0 ? "inflow" : "outflow", // Changed to >= 0 for inflow
-    });
-  });
+  }
 
-  console.log(`Data processing complete for userId: ${userId}. Total revenue: ${totalRevenue}`);
+  // --- Format data for Recharts ---
+  const monthlyRevenueData = Object.entries(monthlyRevenue).map(([name, revenue]) => ({ name: name.split('-')[1], revenue }));
+  
+  const categoryColors = ["#0ea5e9", "#8b5cf6", "#10b981", "#f97316", "#ef4444"];
+  const revenueByCategoryData = Object.entries(revenueByCategory).map(([name, value], index) => ({
+      name,
+      value,
+      color: categoryColors[index % categoryColors.length]
+  }));
 
-  // The following data is still mocked. You would calculate this based on the user's transactions.
+  const avgMonthlyRevenue = monthlyRevenueData.length > 0 ? totalRevenue / monthlyRevenueData.length : 0;
+
+  console.log(`Processing complete. Total Revenue: ${totalRevenue}`);
+
   return {
     mainMetrics: {
-      totalRevenue,
-      revenueChange: 15.2,
-      activeUsers: transactions.length,
-      usersChange: -1.5,
-      avgMonthlyRevenue: 41300,
-      avgChange: 4.8,
+      totalRevenue: Math.round(totalRevenue),
+      revenueChange: 15.2, // Placeholder
+      activeUsers: transactionCount, // Changed to show total income transactions
+      usersChange: -1.5, // Placeholder
+      avgMonthlyRevenue: Math.round(avgMonthlyRevenue),
+      avgChange: 4.8, // Placeholder
     },
-    monthlyRevenueData: [
-      { name: "ינו׳", revenue: 32000 },
-      { name: "פבר׳", revenue: 41000 },
-    ],
-    revenueByCategoryData: [
-      { name: "שירותים", value: 450, color: "#0ea5e9" },
-      { name: "מוצרים", value: 250, color: "#8b5cf6" },
-    ],
-    // Return the last 5 transactions, reversed to show newest first
+    monthlyRevenueData: monthlyRevenueData.length > 0 ? monthlyRevenueData : [{ name: "אין נתונים", revenue: 0 }],
+    revenueByCategoryData: revenueByCategoryData.length > 0 ? revenueByCategoryData : [{ name: "אין נתונים", value: 1, color: "#6b7280" }],
     recentTransactions: recentTransactions.slice(-5).reverse(),
   };
 };
 
-// --- API Routes ---
+// --- API Route ---
 app.get("/api/dashboard/:userId", authenticateApiKey, async (req, res) => {
   const { userId } = req.params;
   try {
@@ -129,19 +152,11 @@ app.get("/api/dashboard/:userId", authenticateApiKey, async (req, res) => {
     res.json(data);
   } catch (error) {
     console.error(`API Error for userId ${userId}:`, error.message);
-    // Send a more specific status code if the user was not found
-    if (error.message.includes("not found")) {
-        res.status(404).json({ error: error.message });
-    } else {
-        res.status(500).json({ error: error.message });
-    }
+    res.status(error.message.includes("not found") ? 404 : 500).json({ error: error.message });
   }
 });
 
-// --- Start the Server ---
+// --- Server Start ---
 app.listen(PORT, () => {
   console.log(`Server is listening on port ${PORT}`);
-  if (!API_KEY) {
-      console.warn("WARNING: API_KEY environment variable is not set. The API will not be secure.");
-  }
 });
