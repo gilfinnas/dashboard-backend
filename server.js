@@ -73,16 +73,9 @@ const getDashboardDataForUser = async (userId) => {
   };
   
   const allIncomeKeys = [...categoriesDefinition["הכנסות"].items, ...categoriesDefinition["הכנסות פטורות ממע'מ"].items];
-  const allExpenseKeys = Object.values(categoriesDefinition)
-      .filter(group => !group.key.includes('income'))
-      .flatMap(group => group.items);
 
   const allMonthsData = [];
-
   const monthNames = ["ינו׳", "פבר׳", "מרץ", "אפר׳", "מאי", "יוני", "יולי", "אוג׳", "ספט׳", "אוק׳", "נוב׳", "דצמ׳"];
-  const now = new Date();
-  const currentMonth = now.getMonth();
-  const currentYear = now.getFullYear().toString();
 
   for (const year in yearsData) {
     for (const monthIndex in yearsData[year]) {
@@ -93,12 +86,10 @@ const getDashboardDataForUser = async (userId) => {
       let monthTotalExpense = 0;
       const expenseBreakdown = { 'ספקים': 0, 'הוצאות קבועות': 0, 'הוצאות משתנות': 0, 'משכורות ומיסים': 0, 'הלוואות': 0, "בלת'מ": 0 };
 
-      // Calculate Total Income
       allIncomeKeys.forEach(catKey => {
           monthTotalIncome += (categoriesData[catKey] || []).reduce((s, v) => s + (Number(v) || 0), 0);
       });
 
-      // Calculate Expense Breakdown
       const groupMapping = {
           'ספקים': categoriesDefinition.ספקים.items,
           'הוצאות קבועות': categoriesDefinition['הוצאות קבועות'].items,
@@ -134,45 +125,60 @@ const getDashboardDataForUser = async (userId) => {
       return a.month - b.month;
   });
 
+  // --- START OF FIX: Handle case with no data gracefully ---
+  if (allMonthsData.length === 0) {
+      console.log(`No data found for user ${userId}. Returning default empty structure.`);
+      return {
+          kpi: { ytdNetProfit: 0, monthlySalaries: 0, monthlyLoans: 0, monthlySuppliers: 0 },
+          charts: { monthlyComparison: [], monthlyExpenseComposition: [], expenseTrend: [] }
+      };
+  }
+  // --- END OF FIX ---
+
   const last6MonthsData = allMonthsData.slice(-6);
 
-  // YTD & Current Month Metrics
   let ytdNetProfit = 0;
   let currentMonthSalaries = 0;
   let currentMonthLoans = 0;
   let currentMonthSuppliers = 0;
   let monthlyExpenseComposition = {};
 
-  // Calculate YTD from all available data for the current year
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonthIndex = now.getMonth();
+
   allMonthsData.forEach(data => {
-      if (data.year === parseInt(currentYear)) {
+      if (data.year === currentYear) {
           ytdNetProfit += data.income - data.expense;
       }
   });
   
-  // Get current month's data for KPIs
-  const currentMonthData = allMonthsData.find(d => d.year === parseInt(currentYear) && d.month === currentMonth);
-  if (currentMonthData) {
-      currentMonthSalaries = currentMonthData.expenseBreakdown['משכורות ומיסים'];
-      currentMonthLoans = currentMonthData.expenseBreakdown['הלוואות'];
-      currentMonthSuppliers = currentMonthData.expenseBreakdown['ספקים'];
+  const currentMonthData = allMonthsData.find(d => d.year === currentYear && d.month === currentMonthIndex);
+  
+  if (currentMonthData && currentMonthData.expenseBreakdown) {
+      currentMonthSalaries = currentMonthData.expenseBreakdown['משכורות ומיסים'] || 0;
+      currentMonthLoans = currentMonthData.expenseBreakdown['הלוואות'] || 0;
+      currentMonthSuppliers = currentMonthData.expenseBreakdown['ספקים'] || 0;
       
-      // For composition chart
       Object.entries(currentMonthData.expenseBreakdown).forEach(([name, value]) => {
           if (value > 0) monthlyExpenseComposition[name] = value;
       });
   }
   
-  // Format data for charts using the last 6 months
   const monthlyComparisonData = last6MonthsData.map(d => ({
     name: d.name,
-    הכנסות: d.income,
-    הוצאות: d.expense,
+    הכנסות: d.income || 0,
+    הוצאות: d.expense || 0,
   }));
   
   const expenseTrendData = last6MonthsData.map(d => ({
       name: d.name,
-      ...d.expenseBreakdown
+      'ספקים': d.expenseBreakdown['ספקים'] || 0,
+      'הוצאות קבועות': d.expenseBreakdown['הוצאות קבועות'] || 0,
+      'הוצאות משתנות': d.expenseBreakdown['הוצאות משתנות'] || 0,
+      'משכורות ומיסים': d.expenseBreakdown['משכורות ומיסים'] || 0,
+      'הלוואות': d.expenseBreakdown['הלוואות'] || 0,
+      "בלת'מ": d.expenseBreakdown["בלת'מ"] || 0,
   }));
 
   const categoryColors = { "ספקים": "#3b82f6", "הוצאות קבועות": "#8b5cf6", "הוצאות משתנות": "#ef4444", "משכורות ומיסים": "#f97316", "הלוואות": "#14b8a6", "בלת'מ": "#64748b" };
