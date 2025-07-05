@@ -77,8 +77,7 @@ const getDashboardDataForUser = async (userId) => {
       .filter(group => !group.key.includes('income'))
       .flatMap(group => group.items);
 
-  const monthlyBreakdown = {}; // For main income/expense chart
-  const expenseTrendBreakdown = {}; // For stacked area chart
+  const allMonthsData = [];
 
   const monthNames = ["ינו׳", "פבר׳", "מרץ", "אפר׳", "מאי", "יוני", "יולי", "אוג׳", "ספט׳", "אוק׳", "נוב׳", "דצמ׳"];
   const now = new Date();
@@ -89,28 +88,17 @@ const getDashboardDataForUser = async (userId) => {
     for (const monthIndex in yearsData[year]) {
       const monthData = yearsData[year][monthIndex];
       const categoriesData = monthData.categories || {};
-      const monthKey = `${monthNames[monthIndex]} ${year}`;
       
-      // Initialize breakdowns for the month
-      if (!monthlyBreakdown[monthKey]) {
-        monthlyBreakdown[monthKey] = { income: 0, expense: 0 };
-      }
-      if (!expenseTrendBreakdown[monthKey]) {
-        expenseTrendBreakdown[monthKey] = {
-            'ספקים': 0, 'הוצאות קבועות': 0, 'הוצאות משתנות': 0, 'משכורות ומיסים': 0, 'הלוואות': 0, "בלת'מ": 0
-        };
-      }
-
       let monthTotalIncome = 0;
       let monthTotalExpense = 0;
+      const expenseBreakdown = { 'ספקים': 0, 'הוצאות קבועות': 0, 'הוצאות משתנות': 0, 'משכורות ומיסים': 0, 'הלוואות': 0, "בלת'מ": 0 };
 
       // Calculate Total Income
       allIncomeKeys.forEach(catKey => {
-          const sum = (categoriesData[catKey] || []).reduce((s, v) => s + (Number(v) || 0), 0);
-          monthTotalIncome += sum;
+          monthTotalIncome += (categoriesData[catKey] || []).reduce((s, v) => s + (Number(v) || 0), 0);
       });
 
-      // Calculate Expense Breakdown for Trend Chart
+      // Calculate Expense Breakdown
       const groupMapping = {
           'ספקים': categoriesDefinition.ספקים.items,
           'הוצאות קבועות': categoriesDefinition['הוצאות קבועות'].items,
@@ -125,13 +113,28 @@ const getDashboardDataForUser = async (userId) => {
           catKeys.forEach(catKey => {
               groupSum += (categoriesData[catKey] || []).reduce((s, v) => s + (Number(v) || 0), 0);
           });
-          expenseTrendBreakdown[monthKey][groupName] = groupSum;
+          expenseBreakdown[groupName] = groupSum;
           monthTotalExpense += groupSum;
       });
       
-      monthlyBreakdown[monthKey] = { income: monthTotalIncome, expense: monthTotalExpense };
+      allMonthsData.push({
+          year: parseInt(year),
+          month: parseInt(monthIndex),
+          name: `${monthNames[monthIndex]} ${year}`,
+          income: monthTotalIncome,
+          expense: monthTotalExpense,
+          expenseBreakdown: expenseBreakdown
+      });
     }
   }
+
+  // Sort all months chronologically
+  allMonthsData.sort((a, b) => {
+      if (a.year !== b.year) return a.year - b.year;
+      return a.month - b.month;
+  });
+
+  const last6MonthsData = allMonthsData.slice(-6);
 
   // YTD & Current Month Metrics
   let ytdNetProfit = 0;
@@ -140,42 +143,36 @@ const getDashboardDataForUser = async (userId) => {
   let currentMonthSuppliers = 0;
   let monthlyExpenseComposition = {};
 
-  if (yearsData[currentYear]) {
-      // YTD Calculation
-      Object.values(yearsData[currentYear]).forEach(monthData => {
-          const categoriesData = monthData.categories || {};
-          let monthIncome = 0, monthExpense = 0;
-          allIncomeKeys.forEach(key => monthIncome += (categoriesData[key] || []).reduce((s, v) => s + (Number(v) || 0), 0));
-          allExpenseKeys.forEach(key => monthExpense += (categoriesData[key] || []).reduce((s, v) => s + (Number(v) || 0), 0));
-          ytdNetProfit += monthIncome - monthExpense;
-      });
+  // Calculate YTD from all available data for the current year
+  allMonthsData.forEach(data => {
+      if (data.year === parseInt(currentYear)) {
+          ytdNetProfit += data.income - data.expense;
+      }
+  });
+  
+  // Get current month's data for KPIs
+  const currentMonthData = allMonthsData.find(d => d.year === parseInt(currentYear) && d.month === currentMonth);
+  if (currentMonthData) {
+      currentMonthSalaries = currentMonthData.expenseBreakdown['משכורות ומיסים'];
+      currentMonthLoans = currentMonthData.expenseBreakdown['הלוואות'];
+      currentMonthSuppliers = currentMonthData.expenseBreakdown['ספקים'];
       
-      // Current Month Specifics
-      const currentMonthData = yearsData[currentYear][currentMonth] || { categories: {} };
-      const currentMonthCategories = currentMonthData.categories;
-      
-      currentMonthSalaries = (currentMonthCategories.salaries || []).reduce((s, v) => s + (Number(v) || 0), 0);
-      categoriesDefinition.הלוואות.items.forEach(key => currentMonthLoans += (currentMonthCategories[key] || []).reduce((s, v) => s + (Number(v) || 0), 0));
-      categoriesDefinition.ספקים.items.forEach(key => currentMonthSuppliers += (currentMonthCategories[key] || []).reduce((s, v) => s + (Number(v) || 0), 0));
-
-      // Monthly Expense Composition
-      Object.entries(expenseTrendBreakdown[`${monthNames[currentMonth]} ${currentYear}`] || {}).forEach(([name, value]) => {
+      // For composition chart
+      Object.entries(currentMonthData.expenseBreakdown).forEach(([name, value]) => {
           if (value > 0) monthlyExpenseComposition[name] = value;
       });
   }
   
-  // Format data for charts
-  const sortedMonths = Object.keys(monthlyBreakdown).sort((a, b) => new Date(a.replace(/([א-ת]+) (\d+)/, '$1 1, $2')) - new Date(b.replace(/([א-ת]+) (\d+)/, '$1 1, $2')));
-
-  const monthlyComparisonData = sortedMonths.slice(-6).map(name => ({
-    name,
-    הכנסות: monthlyBreakdown[name].income,
-    הוצאות: monthlyBreakdown[name].expense,
+  // Format data for charts using the last 6 months
+  const monthlyComparisonData = last6MonthsData.map(d => ({
+    name: d.name,
+    הכנסות: d.income,
+    הוצאות: d.expense,
   }));
   
-  const expenseTrendData = sortedMonths.slice(-6).map(name => ({
-      name,
-      ...expenseTrendBreakdown[name]
+  const expenseTrendData = last6MonthsData.map(d => ({
+      name: d.name,
+      ...d.expenseBreakdown
   }));
 
   const categoryColors = { "ספקים": "#3b82f6", "הוצאות קבועות": "#8b5cf6", "הוצאות משתנות": "#ef4444", "משכורות ומיסים": "#f97316", "הלוואות": "#14b8a6", "בלת'מ": "#64748b" };
@@ -195,9 +192,9 @@ const getDashboardDataForUser = async (userId) => {
         monthlySuppliers: Math.round(currentMonthSuppliers),
     },
     charts: {
-        monthlyComparison: monthlyComparisonData.length > 0 ? monthlyComparisonData : [],
-        monthlyExpenseComposition: expenseCompositionData.length > 0 ? expenseCompositionData : [],
-        expenseTrend: expenseTrendData.length > 0 ? expenseTrendData : [],
+        monthlyComparison: monthlyComparisonData,
+        monthlyExpenseComposition: expenseCompositionData,
+        expenseTrend: expenseTrendData,
     }
   };
 };
