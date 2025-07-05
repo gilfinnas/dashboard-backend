@@ -3,6 +3,7 @@ const admin = require("firebase-admin");
 
 // --- Firebase Admin SDK Initialization ---
 try {
+  // Ensure the environment variable is parsed correctly
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
@@ -24,6 +25,7 @@ const allowedOrigins = [
   "https://gilfinnas.com",
   "https://www.gilfinnas.com",
 ];
+
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (allowedOrigins.includes(origin)) {
@@ -36,8 +38,9 @@ app.use((req, res, next) => {
 // --- API Key Authentication Middleware ---
 const authenticateApiKey = (req, res, next) => {
   const receivedApiKey = req.header("x-api-key");
+  // If API_KEY is not set in environment, skip auth for local development
   if (!API_KEY) {
-    console.warn("SECURITY WARNING: API_KEY is not set.");
+    console.warn("SECURITY WARNING: API_KEY is not set. Skipping authentication.");
     return next();
   }
   if (!receivedApiKey || receivedApiKey !== API_KEY) {
@@ -47,7 +50,7 @@ const authenticateApiKey = (req, res, next) => {
   next();
 };
 
-// --- Data Processing Function (with REAL data) ---
+// --- Data Processing Function ---
 const getDashboardDataForUser = async (userId) => {
   console.log(`Fetching data for userId: ${userId}`);
   const userDocRef = db.collection("users").doc(userId);
@@ -61,86 +64,150 @@ const getDashboardDataForUser = async (userId) => {
   const userData = doc.data();
   const yearsData = userData.years || {};
 
-  let totalRevenue = 0;
-  const monthlyRevenue = {}; // "2025-07": 12000
-  const revenueByCategory = {}; // "מכירות (אשראי)": 5000
+  // --- START: Define categories for server-side logic ---
+  // A simplified version of the frontend categories object
+  const categoriesDefinition = {
+      "הכנסות": ["sales_cash", "sales_credit", "sales_cheques", "sales_transfer", "sales_other"],
+      "הכנסות פטורות ממע'מ": ["exempt_sales_cash", "exempt_sales_credit", "exempt_sales_cheques", "exempt_sales_transfer", "exempt_sales_other"],
+      "ספקים": ["supplier_1", "supplier_2", "supplier_3", "supplier_4", "supplier_5", "supplier_6", "supplier_7", "supplier_8", "supplier_9", "supplier_10"],
+      "הוצאות משתנות": ["electricity", "water", "packaging", "marketing", "custom_var_1", "custom_var_2", "custom_var_3", "custom_var_4"],
+      "הוצאות עם הכרה חלקית במע'מ": ["car_expenses", "phone_expenses", "partial_custom_1", "partial_custom_2"],
+      "הלוואות": ["loan_1", "loan_2", "loan_3", "loan_4", "loan_5", "loan_6", "loan_7", "loan_8", "loan_9", "loan_10"],
+      "הוצאות קבועות": ["rent", "arnona", "salaries", "insurance", "accounting", "communication", "software", "custom_fixed_1", "custom_fixed_2", "custom_fixed_3", "custom_fixed_4"],
+      "תשלומים ומיסים": ["social_security", "income_tax", "vat_payment", "vat_field", "custom_tax_1", "custom_tax_2", "custom_tax_3", "custom_tax_4"],
+      "הוצאות בלתי צפויות": ["misc"]
+  };
+
+  const allIncomeKeys = [...categoriesDefinition["הכנסות"], ...categoriesDefinition["הכנסות פטורות ממע'מ"]];
+  const allExpenseKeys = Object.entries(categoriesDefinition)
+      .filter(([key]) => key !== "הכנסות" && key !== "הכנסות פטורות ממע'מ")
+      .flatMap(([, keys]) => keys);
+  // --- END: Define categories ---
+
+
+  let totalIncome = 0;
+  let totalExpense = 0;
+  const monthlyBreakdown = {}; // e.g., { "יולי 2025": { income: 5000, expense: 3000 } }
+  const expenseByCategory = {}; // e.g., { "הוצאות קבועות": 1500, "ספקים": 1200 }
   const recentTransactions = [];
-  let transactionCount = 0;
 
   const monthNames = ["ינו׳", "פבר׳", "מרץ", "אפר׳", "מאי", "יוני", "יולי", "אוג׳", "ספט׳", "אוק׳", "נוב׳", "דצמ׳"];
+  const now = new Date();
+  const currentMonth = now.getMonth();
+  const currentYear = now.getFullYear();
 
-  // Loop through all years, months, and categories to aggregate data
+  // Aggregate data from all years and months
   for (const year in yearsData) {
     for (const monthIndex in yearsData[year]) {
       const monthData = yearsData[year][monthIndex];
-      const categories = monthData.categories || {};
+      const categoriesData = monthData.categories || {};
       const customNames = monthData.customNames || {};
-      
-      const monthKey = `${year}-${monthNames[monthIndex]}`;
-      monthlyRevenue[monthKey] = 0;
 
-      for (const catKey in categories) {
-        // We consider "income" type categories as revenue
-        if (catKey.includes("sales") || catKey.includes("exempt")) {
-          const dailyValues = categories[catKey] || [];
-          const categorySum = dailyValues.reduce((sum, value) => sum + (Number(value) || 0), 0);
+      const monthKey = `${monthNames[monthIndex]} ${year}`;
+      if (!monthlyBreakdown[monthKey]) {
+        monthlyBreakdown[monthKey] = { income: 0, expense: 0 };
+      }
 
-          if (categorySum > 0) {
-            totalRevenue += categorySum;
-            monthlyRevenue[monthKey] += categorySum;
+      let monthlyIncome = 0;
+      let monthlyExpense = 0;
 
-            // Aggregate by category name
-            const categoryName = customNames[catKey] || catKey.replace(/_/g, " ");
-            revenueByCategory[categoryName] = (revenueByCategory[categoryName] || 0) + categorySum;
-            
-            // Create recent transactions from daily values
-            dailyValues.forEach((value, day) => {
-                if (Number(value) > 0) {
-                    transactionCount++;
-                    recentTransactions.push({
-                        id: `${year}-${monthIndex}-${day}-${catKey}`,
-                        company: `הכנסה מ-${categoryName}`,
-                        amount: Number(value),
-                        type: "inflow",
-                    });
-                }
-            });
-          }
+      // Calculate total income for the month
+      allIncomeKeys.forEach(catKey => {
+        const dailyValues = categoriesData[catKey] || [];
+        const categorySum = dailyValues.reduce((sum, value) => sum + (Number(value) || 0), 0);
+        if (categorySum > 0) {
+          monthlyIncome += categorySum;
+          // Add to recent transactions
+          dailyValues.forEach((value, day) => {
+            if (Number(value) > 0) {
+              recentTransactions.push({
+                id: `${year}-${monthIndex}-${day}-${catKey}`,
+                description: customNames[catKey] || catKey.replace(/_/g, " "),
+                amount: Number(value),
+                type: "inflow",
+                date: new Date(year, monthIndex, day + 1)
+              });
+            }
+          });
         }
-      }
-      // If a month had no revenue, remove it
-      if (monthlyRevenue[monthKey] === 0) {
-        delete monthlyRevenue[monthKey];
-      }
+      });
+
+      // Calculate total expense for the month and by category
+      Object.entries(categoriesDefinition).forEach(([groupName, keys]) => {
+          if (groupName !== "הכנסות" && groupName !== "הכנסות פטורות ממע'מ") {
+              let groupSum = 0;
+              keys.forEach(catKey => {
+                  const dailyValues = categoriesData[catKey] || [];
+                  const categorySum = dailyValues.reduce((sum, value) => sum + (Number(value) || 0), 0);
+                  if (categorySum > 0) {
+                      groupSum += categorySum;
+                      // Add to recent transactions
+                      dailyValues.forEach((value, day) => {
+                          if (Number(value) > 0) {
+                              recentTransactions.push({
+                                  id: `${year}-${monthIndex}-${day}-${catKey}`,
+                                  description: customNames[catKey] || catKey.replace(/_/g, " "),
+                                  amount: Number(value),
+                                  type: "outflow",
+                                  date: new Date(year, monthIndex, day + 1)
+                              });
+                          }
+                      });
+                  }
+              });
+              if(groupSum > 0){
+                 monthlyExpense += groupSum;
+                 expenseByCategory[groupName] = (expenseByCategory[groupName] || 0) + groupSum;
+              }
+          }
+      });
+      
+      monthlyBreakdown[monthKey].income += monthlyIncome;
+      monthlyBreakdown[monthKey].expense += monthlyExpense;
     }
   }
 
-  // --- Format data for Recharts ---
-  const monthlyRevenueData = Object.entries(monthlyRevenue).map(([name, revenue]) => ({ name: name.split('-')[1], revenue }));
+  // Get current month's totals for KPI cards
+  const currentMonthKey = `${monthNames[currentMonth]} ${currentYear}`;
+  const currentMonthIncome = monthlyBreakdown[currentMonthKey]?.income || 0;
+  const currentMonthExpense = monthlyBreakdown[currentMonthKey]?.expense || 0;
   
-  const categoryColors = ["#0ea5e9", "#8b5cf6", "#10b981", "#f97316", "#ef4444"];
-  const revenueByCategoryData = Object.entries(revenueByCategory).map(([name, value], index) => ({
+  // --- Format data for Recharts ---
+  const monthlyComparisonData = Object.entries(monthlyBreakdown).map(([name, values]) => ({
+    name,
+    הכנסות: values.income,
+    הוצאות: values.expense,
+  })).slice(-6); // Get last 6 months for the chart
+
+  const categoryColors = ["#3b82f6", "#8b5cf6", "#10b981", "#f97316", "#ef4444", "#6366f1", "#f59e0b"];
+  const expenseByCategoryData = Object.entries(expenseByCategory)
+    .sort(([, a], [, b]) => b - a) // Sort by value descending
+    .map(([name, value], index) => ({
       name,
       value,
       color: categoryColors[index % categoryColors.length]
   }));
 
-  const avgMonthlyRevenue = monthlyRevenueData.length > 0 ? totalRevenue / monthlyRevenueData.length : 0;
+  // Sort recent transactions by date and take the last 5
+  const sortedTransactions = recentTransactions
+    .sort((a, b) => b.date - a.date)
+    .slice(0, 5);
 
-  console.log(`Processing complete. Total Revenue: ${totalRevenue}`);
+  console.log(`Processing complete. Current Month Income: ${currentMonthIncome}, Expense: ${currentMonthExpense}`);
 
   return {
     mainMetrics: {
-      totalRevenue: Math.round(totalRevenue),
-      revenueChange: 15.2, // Placeholder
-      activeUsers: transactionCount, // Changed to show total income transactions
-      usersChange: -1.5, // Placeholder
-      avgMonthlyRevenue: Math.round(avgMonthlyRevenue),
-      avgChange: 4.8, // Placeholder
+      currentMonthIncome: Math.round(currentMonthIncome),
+      currentMonthExpense: Math.round(currentMonthExpense),
+      currentMonthBalance: Math.round(currentMonthIncome - currentMonthExpense),
+      // Placeholders for change metrics
+      incomeChange: 12.5,
+      expenseChange: -5.2,
+      balanceChange: 20.1,
     },
-    monthlyRevenueData: monthlyRevenueData.length > 0 ? monthlyRevenueData : [{ name: "אין נתונים", revenue: 0 }],
-    revenueByCategoryData: revenueByCategoryData.length > 0 ? revenueByCategoryData : [{ name: "אין נתונים", value: 1, color: "#6b7280" }],
-    recentTransactions: recentTransactions.slice(-5).reverse(),
+    monthlyComparisonData: monthlyComparisonData.length > 0 ? monthlyComparisonData : [{ name: "אין נתונים", הכנסות: 0, הוצאות: 0 }],
+    expenseByCategoryData: expenseByCategoryData.length > 0 ? expenseByCategoryData : [{ name: "אין נתונים", value: 1, color: "#6b7280" }],
+    recentTransactions: sortedTransactions,
   };
 };
 
