@@ -1,213 +1,197 @@
-"use client"
+const express = require("express");
+const admin = require("firebase-admin");
 
-import type React from "react"
-import { useState, useEffect } from "react"
-import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
-  PieChart, Pie, Cell,
-  AreaChart, Area,
-} from "recharts"
-import { ArrowLeft, Landmark, TrendingUp, Truck, Users } from "lucide-react"
-
-// --- Type Definitions ---
-interface DashboardData {
-  kpi: {
-    ytdNetProfit: number
-    monthlySalaries: number
-    monthlyLoans: number
-    monthlySuppliers: number
-  }
-  charts: {
-    monthlyComparison: { name: string; הכנסות: number; הוצאות: number }[]
-    monthlyExpenseComposition: { name: string; value: number; color: string }[]
-    expenseTrend: { name: string; [key: string]: number | string }[]
-  }
+// --- Firebase Admin SDK Initialization ---
+try {
+  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
+  console.log("Firebase Admin SDK initialized successfully.");
+} catch (error) {
+  console.error("CRITICAL ERROR: Could not initialize Firebase.", error);
+  process.exit(1);
 }
 
-// --- Helper Components ---
-const KpiCard: React.FC<{ title: string; value: string; icon: React.ReactNode; color: string }> = ({ title, value, icon, color }) => (
-  <div className="bg-slate-800/60 p-4 rounded-xl border border-slate-700 flex flex-col justify-between h-full">
-    <div className="flex justify-between items-start">
-      <p className="text-slate-400 text-sm font-medium">{title}</p>
-      <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${color}`}>
-        {icon}
-      </div>
-    </div>
-    <p className="text-3xl font-bold text-white mt-2">{value}</p>
-  </div>
-)
+const db = admin.firestore();
+const app = express();
+const PORT = process.env.PORT || 3000;
+const API_KEY = process.env.API_KEY;
 
-const ChartCard: React.FC<{ title: string; children: React.ReactNode; className?: string }> = ({ title, children, className = "" }) => (
-  <div className={`bg-slate-800/60 p-6 rounded-xl border border-slate-700 h-full flex flex-col ${className}`}>
-    <h3 className="text-lg font-semibold text-white mb-4">{title}</h3>
-    <div className="flex-grow">{children}</div>
-  </div>
-)
-
-const CustomTooltip = ({ active, payload, label }: any) => {
-  if (active && payload && payload.length) {
-    return (
-      <div className="bg-slate-900/80 backdrop-blur-sm p-3 rounded-lg border border-slate-600 shadow-xl">
-        <p className="label font-bold text-cyan-300">{label}</p>
-        {payload.map((pld: any, index: number) => (
-          <p key={index} style={{ color: pld.color || pld.fill }}>
-            {`${pld.name}: ₪${(pld.value || 0).toLocaleString()}`}
-          </p>
-        ))}
-      </div>
-    );
+// --- Middlewares ---
+const corsMiddleware = (req, res, next) => {
+  const allowedOrigins = [
+    "https://dashboard-frontend-five-azure.vercel.app",
+    "https://gilfinnas.com",
+    "https://www.gilfinnas.com",
+  ];
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
   }
-  return null;
+  res.header("Access-Control-Allow-Methods", "GET, OPTIONS");
+  res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, x-api-key");
+  
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+
+  next();
 };
 
-const EXPENSE_TREND_COLORS = { "ספקים": "#3b82f6", "הוצאות קבועות": "#8b5cf6", "הוצאות משתנות": "#ef4444", "משכורות ומיסים": "#f97316", "הלוואות": "#14b8a6", "בלת'מ": "#64748b" };
+const authMiddleware = (req, res, next) => {
+  if (!API_KEY) {
+    console.warn("API_KEY is not set. Skipping authentication.");
+    return next();
+  }
+  if (req.header("x-api-key") !== API_KEY) {
+    return res.status(403).json({ error: "Forbidden: Invalid API key." });
+  }
+  next();
+};
 
-// --- Main Component ---
-export default function DashboardPage() {
-  const [data, setData] = useState<DashboardData | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+app.use(corsMiddleware);
+app.use(authMiddleware);
 
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search)
-    const userId = params.get("userId")
+// --- Data Processing Function ---
+const getDashboardDataForUser = async (userId) => {
+  console.log(`[1/5] Fetching data for userId: ${userId}`);
+  const userDocRef = db.collection("users").doc(userId);
+  const doc = await userDocRef.get();
 
-    const fetchDataForUser = async (id: string) => {
-      try {
-        setLoading(true)
-        setError(null)
-        const apiUrl = `https://dashboard-backend-7vgh.onrender.com/api/dashboard/${id}`
-        const apiKey = process.env.NEXT_PUBLIC_API_KEY
-        if (!apiKey) throw new Error("API Key is not configured.")
-
-        const response = await fetch(apiUrl, { headers: { "x-api-key": apiKey } })
-        if (!response.ok) {
-          const errorData = await response.json();
-          throw new Error(errorData.error || `Error: ${response.status}`);
-        }
-        
-        const result: DashboardData = await response.json()
-        setData(result)
-      } catch (err: any) {
-        console.error("Fetch error:", err);
-        setError(err.message)
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    if (userId && userId !== "null" && userId !== "undefined") {
-      fetchDataForUser(userId)
-    } else {
-      setError("שגיאה: מזהה לקוח לא נמצא בכתובת.")
-      setLoading(false)
-    }
-  }, [])
-
-  // --- Loading and Error States ---
-  if (loading) return (
-    <div className="min-h-screen bg-slate-900 text-white flex items-center justify-center text-xl font-semibold">
-      <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-cyan-400"></div>
-      <span className="mr-4">טוען דשבורד ניהולי...</span>
-    </div>
-  )
-
-  if (error) return (
-    <div className="min-h-screen bg-slate-900 text-red-400 flex flex-col items-center justify-center text-lg p-8 text-center">
-      <h2 className="text-3xl font-bold mb-4">אופס, אירעה שגיאה</h2>
-      <p>{error}</p>
-      <a href="https://gilfinnas.com/" className="mt-6 bg-cyan-500 hover:bg-cyan-600 text-white font-semibold px-6 py-3 rounded-lg flex items-center gap-2 shadow-lg">
-        <span>חזרה למערכת</span>
-        <ArrowLeft className="w-5 h-5" />
-      </a>
-    </div>
-  )
-
-  // --- No Data State (Robust Check) ---
-  const hasDataForCharts = data && data.charts && Array.isArray(data.charts.monthlyComparison) && data.charts.monthlyComparison.length > 0;
-  if (!hasDataForCharts) {
-    return (
-      <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center text-xl text-center p-4">
-          <h2 className="text-3xl font-bold mb-4">אין מספיק נתונים</h2>
-          <p className="max-w-md">כדי להציג את הדשבורד הניהולי, יש להזין נתונים במערכת התזרים הראשית תחילה.</p>
-          <a href="https://gilfinnas.com/" className="mt-6 bg-cyan-500 hover:bg-cyan-600 text-white font-semibold px-6 py-3 rounded-lg flex items-center gap-2 shadow-lg">
-          <span>חזרה למערכת התזרים</span>
-          <ArrowLeft className="w-5 h-5" />
-        </a>
-      </div>
-    )
+  if (!doc.exists) {
+    throw new Error(`User with ID '${userId}' not found.`);
   }
 
-  // --- Main Render ---
-  return (
-    <div className="min-h-screen bg-slate-900 text-slate-300 font-sans p-4 sm:p-6 lg:p-8" dir="rtl">
-      <div className="relative z-10 max-w-screen-2xl mx-auto">
-        <header className="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-8">
-          <div>
-            <h1 className="text-3xl font-extrabold text-white">תקציר מנהלים</h1>
-            <p className="text-slate-400 mt-1">תמונת מצב פיננסית של העסק</p>
-          </div>
-          <a href="https://gilfinnas.com/" className="mt-4 sm:mt-0 bg-slate-700 hover:bg-slate-600 text-white font-semibold px-5 py-2.5 rounded-lg flex items-center gap-2 shadow-lg transition-colors duration-200">
-            <span>מעבר לתזרים המלא</span>
-            <ArrowLeft className="w-4 h-4" />
-          </a>
-        </header>
+  console.log(`[2/5] Processing raw data...`);
+  const userData = doc.data();
+  const yearsData = userData.years || {};
 
-        <main className="grid grid-cols-12 gap-6">
-          
-          <div className="col-span-12 lg:col-span-3 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-6">
-            <KpiCard title="רווח נקי (שנתי)" value={`₪${(data.kpi?.ytdNetProfit || 0).toLocaleString()}`} icon={<TrendingUp size={24} />} color="bg-green-500/20 text-green-400" />
-            <KpiCard title="עלות משכורות (חודשי)" value={`₪${(data.kpi?.monthlySalaries || 0).toLocaleString()}`} icon={<Users size={24} />} color="bg-amber-500/20 text-amber-400" />
-            <KpiCard title="החזרי הלוואות (חודשי)" value={`₪${(data.kpi?.monthlyLoans || 0).toLocaleString()}`} icon={<Landmark size={24} />} color="bg-teal-500/20 text-teal-400" />
-            <KpiCard title="תשלום לספקים (חודשי)" value={`₪${(data.kpi?.monthlySuppliers || 0).toLocaleString()}`} icon={<Truck size={24} />} color="bg-blue-500/20 text-blue-400" />
-          </div>
+  const categoriesDefinition = {
+      "הכנסות": { key: 'income', items: ["sales_cash", "sales_credit", "sales_cheques", "sales_transfer", "sales_other"]},
+      "הכנסות פטורות ממע'מ": { key: 'income_exempt', items: ["exempt_sales_cash", "exempt_sales_credit", "exempt_sales_cheques", "exempt_sales_transfer", "exempt_sales_other"]},
+      "ספקים": { key: 'suppliers', items: ["supplier_1", "supplier_2", "supplier_3", "supplier_4", "supplier_5", "supplier_6", "supplier_7", "supplier_8", "supplier_9", "supplier_10"]},
+      "הוצאות משתנות": { key: 'variable_expenses', items: ["electricity", "water", "packaging", "marketing", "custom_var_1", "custom_var_2", "custom_var_3", "custom_var_4", "car_expenses", "phone_expenses", "partial_custom_1", "partial_custom_2"]},
+      "הלוואות": { key: 'loans', items: ["loan_1", "loan_2", "loan_3", "loan_4", "loan_5", "loan_6", "loan_7", "loan_8", "loan_9", "loan_10"]},
+      "הוצאות קבועות": { key: 'fixed_expenses', items: ["rent", "arnona", "insurance", "accounting", "communication", "software", "custom_fixed_1", "custom_fixed_2", "custom_fixed_3", "custom_fixed_4"]},
+      "משכורות ותשלומים": { key: 'salaries_and_taxes', items: ["salaries", "social_security", "income_tax", "vat_payment", "vat_field", "custom_tax_1", "custom_tax_2", "custom_tax_3", "custom_tax_4"]},
+      "בלת'מ": { key: 'misc', items: ["misc"]}
+  };
+  
+  const allIncomeKeys = [...categoriesDefinition["הכנסות"].items, ...categoriesDefinition["הכנסות פטורות ממע'מ"].items];
+  const allMonthsData = [];
+  const monthNames = ["ינו׳", "פבר׳", "מרץ", "אפר׳", "מאי", "יוני", "יולי", "אוג׳", "ספט׳", "אוק׳", "נוב׳", "דצמ׳"];
+  const groupMapping = {
+      'ספקים': categoriesDefinition.ספקים.items,
+      'הוצאות קבועות': categoriesDefinition['הוצאות קבועות'].items,
+      'הוצאות משתנות': categoriesDefinition['הוצאות משתנות'].items,
+      'משכורות ומיסים': categoriesDefinition['משכורות ותשלומים'].items,
+      'הלוואות': categoriesDefinition.הלוואות.items,
+      "בלת'מ": categoriesDefinition["בלת'מ"].items,
+  };
 
-          <div className="col-span-12 lg:col-span-9 grid grid-cols-1 gap-6">
-            <ChartCard title="הכנסות מול הוצאות (6 חודשים)">
-                <ResponsiveContainer width="100%" height={250}>
-                  <BarChart data={data.charts.monthlyComparison} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255, 255, 255, 0.1)" />
-                    <XAxis dataKey="name" tick={{ fill: "#94a3b8" }} fontSize={12} />
-                    <YAxis tick={{ fill: "#94a3b8" }} fontSize={12} tickFormatter={(value) => `₪${value / 1000}k`} />
-                    <Tooltip content={<CustomTooltip />} cursor={{ fill: 'rgba(14, 165, 233, 0.1)' }} />
-                    <Legend wrapperStyle={{ color: '#e5e7eb', fontSize: '14px' }} />
-                    <Bar dataKey="הכנסות" fill="#0ea5e9" name="הכנסות" radius={[4, 4, 0, 0]} />
-                    <Bar dataKey="הוצאות" fill="#f43f5e" name="הוצאות" radius={[4, 4, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-            </ChartCard>
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                 <ChartCard title="מגמת הוצאות לפי סוג">
-                    <ResponsiveContainer width="100%" height={250}>
-                        <AreaChart data={data.charts.expenseTrend} margin={{ top: 5, right: 20, left: -10, bottom: 0 }}>
-                             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255, 255, 255, 0.1)" />
-                             <XAxis dataKey="name" tick={{ fill: "#94a3b8" }} fontSize={12}/>
-                             <YAxis tick={{ fill: "#94a3b8" }} fontSize={12} tickFormatter={(value) => `₪${value / 1000}k`}/>
-                             <Tooltip content={<CustomTooltip />} />
-                             <Legend wrapperStyle={{ color: '#e5e7eb', fontSize: '12px' }} />
-                             {/* --- START OF FIX --- */}
-                             {(Object.keys(EXPENSE_TREND_COLORS) as Array<keyof typeof EXPENSE_TREND_COLORS>).map(key => (
-                                <Area key={key} type="monotone" dataKey={key} stackId="1" stroke={EXPENSE_TREND_COLORS[key]} fill={EXPENSE_TREND_COLORS[key]} fillOpacity={0.6} />
-                             ))}
-                             {/* --- END OF FIX --- */}
-                        </AreaChart>
-                    </ResponsiveContainer>
-                 </ChartCard>
-                 <ChartCard title="הרכב הוצאות (חודש נוכחי)">
-                    <ResponsiveContainer width="100%" height={250}>
-                        <PieChart>
-                            <Pie data={data.charts.monthlyExpenseComposition} cx="50%" cy="50%" innerRadius={60} outerRadius={90} dataKey="value" paddingAngle={3}>
-                            {data.charts.monthlyExpenseComposition.map((entry, index) => <Cell key={`cell-${index}`} fill={entry.color} stroke={'#1e293b'} />)}
-                            </Pie>
-                            <Tooltip content={<CustomTooltip />} />
-                            <Legend iconType="circle" layout="vertical" align="right" verticalAlign="middle" wrapperStyle={{ fontSize: '12px', lineHeight: '20px' }}/>
-                        </PieChart>
-                    </ResponsiveContainer>
-                </ChartCard>
-            </div>
-          </div>
-        </main>
-      </div>
-    </div>
-  )
-}
+  for (const year in yearsData) {
+    for (const monthIndex in yearsData[year]) {
+      const categoriesData = yearsData[year][monthIndex]?.categories || {};
+      
+      let monthTotalIncome = 0;
+      allIncomeKeys.forEach(catKey => {
+          monthTotalIncome += (categoriesData[catKey] || []).reduce((s, v) => s + (Number(v) || 0), 0);
+      });
+
+      const expenseBreakdown = {};
+      let monthTotalExpense = 0;
+      Object.entries(groupMapping).forEach(([groupName, catKeys]) => {
+          const groupSum = catKeys.reduce((sum, key) => sum + (categoriesData[key] || []).reduce((s, v) => s + (Number(v) || 0), 0), 0);
+          expenseBreakdown[groupName] = groupSum;
+          monthTotalExpense += groupSum;
+      });
+      
+      allMonthsData.push({
+          year: parseInt(year),
+          month: parseInt(monthIndex),
+          name: `${monthNames[monthIndex]} ${year}`,
+          income: monthTotalIncome,
+          expense: monthTotalExpense,
+          expenseBreakdown: expenseBreakdown
+      });
+    }
+  }
+
+  const finalData = {
+    kpi: { ytdNetProfit: 0, monthlySalaries: 0, monthlyLoans: 0, monthlySuppliers: 0 },
+    charts: { monthlyComparison: [], monthlyExpenseComposition: [], expenseTrend: [] }
+  };
+
+  if (allMonthsData.length === 0) {
+      console.log(`[3/5] No data found for user. Returning default empty structure.`);
+      return finalData;
+  }
+
+  allMonthsData.sort((a, b) => (a.year - b.year) || (a.month - b.month));
+  console.log(`[3/5] Sorted ${allMonthsData.length} months of data.`);
+
+  const last6MonthsData = allMonthsData.slice(-6);
+  const now = new Date();
+  const currentYear = now.getFullYear();
+  const currentMonthIndex = now.getMonth();
+
+  let ytdNetProfit = 0;
+  allMonthsData.forEach(data => {
+      if (data.year === currentYear) {
+          ytdNetProfit += data.income - data.expense;
+      }
+  });
+  finalData.kpi.ytdNetProfit = Math.round(ytdNetProfit);
+  
+  const currentMonthData = allMonthsData.find(d => d.year === currentYear && d.month === currentMonthIndex);
+  
+  if (currentMonthData && currentMonthData.expenseBreakdown) {
+      finalData.kpi.monthlySalaries = Math.round(currentMonthData.expenseBreakdown['משכורות ומיסים'] || 0);
+      finalData.kpi.monthlyLoans = Math.round(currentMonthData.expenseBreakdown['הלוואות'] || 0);
+      finalData.kpi.monthlySuppliers = Math.round(currentMonthData.expenseBreakdown['ספקים'] || 0);
+      
+      const categoryColors = { "ספקים": "#3b82f6", "הוצאות קבועות": "#8b5cf6", "הוצאות משתנות": "#ef4444", "משכורות ומיסים": "#f97316", "הלוואות": "#14b8a6", "בלת'מ": "#64748b" };
+      finalData.charts.monthlyExpenseComposition = Object.entries(currentMonthData.expenseBreakdown)
+        .filter(([, value]) => value > 0)
+        .sort(([, a], [, b]) => b - a)
+        .map(([name, value]) => ({ name, value, color: categoryColors[name] || "#6b7280" }));
+  }
+  console.log(`[4/5] Calculated KPIs.`);
+  
+  finalData.charts.monthlyComparison = last6MonthsData.map(d => ({
+    name: d.name,
+    הכנסות: d.income || 0,
+    הוצאות: d.expense || 0,
+  }));
+  
+  finalData.charts.expenseTrend = last6MonthsData.map(d => ({
+      name: d.name,
+      'ספקים': d.expenseBreakdown['ספקים'] || 0,
+      'הוצאות קבועות': d.expenseBreakdown['הוצאות קבועות'] || 0,
+      'הוצאות משתנות': d.expenseBreakdown['הוצאות משתנות'] || 0,
+      'משכורות ומיסים': d.expenseBreakdown['משכורות ומיסים'] || 0,
+      'הלוואות': d.expenseBreakdown['הלוואות'] || 0,
+      "בלת'מ": d.expenseBreakdown["בלת'מ"] || 0,
+  }));
+  console.log(`[5/5] Formatted chart data. Sending response.`);
+  
+  return finalData;
+};
+
+// --- API Route ---
+app.get("/api/dashboard/:userId", async (req, res) => {
+  const { userId } = req.params;
+  try {
+    const data = await getDashboardDataForUser(userId);
+    res.json(data);
+  } catch (error) {
+    console.error(`API Error for userId ${userId}:`, error.message);
+    res.status(error.message.includes("not found") ? 404 : 500).json({ error: error.message });
+  }
+});
+
+// --- Server Start ---
+app.listen(PORT, () => {
+  console.log(`Server is listening on port ${PORT}`);
+});
