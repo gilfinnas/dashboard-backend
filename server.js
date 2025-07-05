@@ -7,9 +7,9 @@ try {
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
   });
-  console.log("Firebase Admin SDK initialized successfully for project:", serviceAccount.project_id);
+  console.log("Firebase Admin SDK initialized successfully.");
 } catch (error) {
-  console.error("CRITICAL ERROR: Could not initialize Firebase service account.", error);
+  console.error("CRITICAL ERROR: Could not initialize Firebase.", error);
   process.exit(1);
 }
 
@@ -18,38 +18,38 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY;
 
-// --- CORS Middleware ---
-const allowedOrigins = [
-  "https://dashboard-frontend-five-azure.vercel.app",
-  "https://gilfinnas.com",
-  "https://www.gilfinnas.com",
-];
-app.use((req, res, next) => {
+// --- Middlewares ---
+const corsMiddleware = (req, res, next) => {
+  const allowedOrigins = [
+    "https://dashboard-frontend-five-azure.vercel.app",
+    "https://gilfinnas.com",
+    "https://www.gilfinnas.com",
+  ];
   const origin = req.headers.origin;
   if (allowedOrigins.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   }
   res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, x-api-key");
   next();
-});
+};
 
-// --- API Key Authentication Middleware ---
-const authenticateApiKey = (req, res, next) => {
-  const receivedApiKey = req.header("x-api-key");
+const authMiddleware = (req, res, next) => {
   if (!API_KEY) {
-    console.warn("SECURITY WARNING: API_KEY is not set. Skipping authentication.");
+    console.warn("API_KEY is not set. Skipping authentication.");
     return next();
   }
-  if (!receivedApiKey || receivedApiKey !== API_KEY) {
-    console.error(`Forbidden: Invalid API key received.`);
+  if (req.header("x-api-key") !== API_KEY) {
     return res.status(403).json({ error: "Forbidden: Invalid API key." });
   }
   next();
 };
 
+app.use(corsMiddleware);
+app.use(authMiddleware);
+
 // --- Data Processing Function ---
 const getDashboardDataForUser = async (userId) => {
-  console.log(`Fetching data for userId: ${userId}`);
+  console.log(`[1/5] Fetching data for userId: ${userId}`);
   const userDocRef = db.collection("users").doc(userId);
   const doc = await userDocRef.get();
 
@@ -57,7 +57,7 @@ const getDashboardDataForUser = async (userId) => {
     throw new Error(`User with ID '${userId}' not found.`);
   }
 
-  console.log(`Processing data for user: ${userId}`);
+  console.log(`[2/5] Processing raw data...`);
   const userData = doc.data();
   const yearsData = userData.years || {};
 
@@ -73,37 +73,31 @@ const getDashboardDataForUser = async (userId) => {
   };
   
   const allIncomeKeys = [...categoriesDefinition["הכנסות"].items, ...categoriesDefinition["הכנסות פטורות ממע'מ"].items];
-
   const allMonthsData = [];
   const monthNames = ["ינו׳", "פבר׳", "מרץ", "אפר׳", "מאי", "יוני", "יולי", "אוג׳", "ספט׳", "אוק׳", "נוב׳", "דצמ׳"];
+  const groupMapping = {
+      'ספקים': categoriesDefinition.ספקים.items,
+      'הוצאות קבועות': categoriesDefinition['הוצאות קבועות'].items,
+      'הוצאות משתנות': categoriesDefinition['הוצאות משתנות'].items,
+      'משכורות ומיסים': categoriesDefinition['משכורות ותשלומים'].items,
+      'הלוואות': categoriesDefinition.הלוואות.items,
+      "בלת'מ": categoriesDefinition["בלת'מ"].items,
+  };
 
+  // Step 1: Aggregate all data into a simple, sortable array
   for (const year in yearsData) {
     for (const monthIndex in yearsData[year]) {
-      const monthData = yearsData[year][monthIndex];
-      const categoriesData = monthData.categories || {};
+      const categoriesData = yearsData[year][monthIndex]?.categories || {};
       
       let monthTotalIncome = 0;
-      let monthTotalExpense = 0;
-      const expenseBreakdown = { 'ספקים': 0, 'הוצאות קבועות': 0, 'הוצאות משתנות': 0, 'משכורות ומיסים': 0, 'הלוואות': 0, "בלת'מ": 0 };
-
       allIncomeKeys.forEach(catKey => {
           monthTotalIncome += (categoriesData[catKey] || []).reduce((s, v) => s + (Number(v) || 0), 0);
       });
 
-      const groupMapping = {
-          'ספקים': categoriesDefinition.ספקים.items,
-          'הוצאות קבועות': categoriesDefinition['הוצאות קבועות'].items,
-          'הוצאות משתנות': categoriesDefinition['הוצאות משתנות'].items,
-          'משכורות ומיסים': categoriesDefinition['משכורות ותשלומים'].items,
-          'הלוואות': categoriesDefinition.הלוואות.items,
-          "בלת'מ": categoriesDefinition["בלת'מ"].items,
-      };
-      
+      const expenseBreakdown = {};
+      let monthTotalExpense = 0;
       Object.entries(groupMapping).forEach(([groupName, catKeys]) => {
-          let groupSum = 0;
-          catKeys.forEach(catKey => {
-              groupSum += (categoriesData[catKey] || []).reduce((s, v) => s + (Number(v) || 0), 0);
-          });
+          const groupSum = catKeys.reduce((sum, key) => sum + (categoriesData[key] || []).reduce((s, v) => s + (Number(v) || 0), 0), 0);
           expenseBreakdown[groupName] = groupSum;
           monthTotalExpense += groupSum;
       });
@@ -119,59 +113,58 @@ const getDashboardDataForUser = async (userId) => {
     }
   }
 
-  // Sort all months chronologically
-  allMonthsData.sort((a, b) => {
-      if (a.year !== b.year) return a.year - b.year;
-      return a.month - b.month;
-  });
+  // Step 2: Define a default, empty structure. This will be returned if no data exists.
+  const finalData = {
+    kpi: { ytdNetProfit: 0, monthlySalaries: 0, monthlyLoans: 0, monthlySuppliers: 0 },
+    charts: { monthlyComparison: [], monthlyExpenseComposition: [], expenseTrend: [] }
+  };
 
-  // --- START OF FIX: Handle case with no data gracefully ---
   if (allMonthsData.length === 0) {
-      console.log(`No data found for user ${userId}. Returning default empty structure.`);
-      return {
-          kpi: { ytdNetProfit: 0, monthlySalaries: 0, monthlyLoans: 0, monthlySuppliers: 0 },
-          charts: { monthlyComparison: [], monthlyExpenseComposition: [], expenseTrend: [] }
-      };
+      console.log(`[3/5] No data found for user. Returning default empty structure.`);
+      return finalData;
   }
-  // --- END OF FIX ---
 
+  // Step 3: Sort all months chronologically (robustly)
+  allMonthsData.sort((a, b) => (a.year - b.year) || (a.month - b.month));
+  console.log(`[3/5] Sorted ${allMonthsData.length} months of data.`);
+
+  // Step 4: Process the sorted data
   const last6MonthsData = allMonthsData.slice(-6);
-
-  let ytdNetProfit = 0;
-  let currentMonthSalaries = 0;
-  let currentMonthLoans = 0;
-  let currentMonthSuppliers = 0;
-  let monthlyExpenseComposition = {};
-
   const now = new Date();
   const currentYear = now.getFullYear();
   const currentMonthIndex = now.getMonth();
 
+  let ytdNetProfit = 0;
   allMonthsData.forEach(data => {
       if (data.year === currentYear) {
           ytdNetProfit += data.income - data.expense;
       }
   });
+  finalData.kpi.ytdNetProfit = Math.round(ytdNetProfit);
   
   const currentMonthData = allMonthsData.find(d => d.year === currentYear && d.month === currentMonthIndex);
   
   if (currentMonthData && currentMonthData.expenseBreakdown) {
-      currentMonthSalaries = currentMonthData.expenseBreakdown['משכורות ומיסים'] || 0;
-      currentMonthLoans = currentMonthData.expenseBreakdown['הלוואות'] || 0;
-      currentMonthSuppliers = currentMonthData.expenseBreakdown['ספקים'] || 0;
+      finalData.kpi.monthlySalaries = Math.round(currentMonthData.expenseBreakdown['משכורות ומיסים'] || 0);
+      finalData.kpi.monthlyLoans = Math.round(currentMonthData.expenseBreakdown['הלוואות'] || 0);
+      finalData.kpi.monthlySuppliers = Math.round(currentMonthData.expenseBreakdown['ספקים'] || 0);
       
-      Object.entries(currentMonthData.expenseBreakdown).forEach(([name, value]) => {
-          if (value > 0) monthlyExpenseComposition[name] = value;
-      });
+      const categoryColors = { "ספקים": "#3b82f6", "הוצאות קבועות": "#8b5cf6", "הוצאות משתנות": "#ef4444", "משכורות ומיסים": "#f97316", "הלוואות": "#14b8a6", "בלת'מ": "#64748b" };
+      finalData.charts.monthlyExpenseComposition = Object.entries(currentMonthData.expenseBreakdown)
+        .filter(([, value]) => value > 0)
+        .sort(([, a], [, b]) => b - a)
+        .map(([name, value]) => ({ name, value, color: categoryColors[name] || "#6b7280" }));
   }
+  console.log(`[4/5] Calculated KPIs.`);
   
-  const monthlyComparisonData = last6MonthsData.map(d => ({
+  // Step 5: Format for charts
+  finalData.charts.monthlyComparison = last6MonthsData.map(d => ({
     name: d.name,
     הכנסות: d.income || 0,
     הוצאות: d.expense || 0,
   }));
   
-  const expenseTrendData = last6MonthsData.map(d => ({
+  finalData.charts.expenseTrend = last6MonthsData.map(d => ({
       name: d.name,
       'ספקים': d.expenseBreakdown['ספקים'] || 0,
       'הוצאות קבועות': d.expenseBreakdown['הוצאות קבועות'] || 0,
@@ -180,33 +173,13 @@ const getDashboardDataForUser = async (userId) => {
       'הלוואות': d.expenseBreakdown['הלוואות'] || 0,
       "בלת'מ": d.expenseBreakdown["בלת'מ"] || 0,
   }));
-
-  const categoryColors = { "ספקים": "#3b82f6", "הוצאות קבועות": "#8b5cf6", "הוצאות משתנות": "#ef4444", "משכורות ומיסים": "#f97316", "הלוואות": "#14b8a6", "בלת'מ": "#64748b" };
-  const expenseCompositionData = Object.entries(monthlyExpenseComposition)
-    .sort(([, a], [, b]) => b - a)
-    .map(([name, value]) => ({
-      name,
-      value,
-      color: categoryColors[name] || "#6b7280"
-  }));
+  console.log(`[5/5] Formatted chart data. Sending response.`);
   
-  return {
-    kpi: {
-        ytdNetProfit: Math.round(ytdNetProfit),
-        monthlySalaries: Math.round(currentMonthSalaries),
-        monthlyLoans: Math.round(currentMonthLoans),
-        monthlySuppliers: Math.round(currentMonthSuppliers),
-    },
-    charts: {
-        monthlyComparison: monthlyComparisonData,
-        monthlyExpenseComposition: expenseCompositionData,
-        expenseTrend: expenseTrendData,
-    }
-  };
+  return finalData;
 };
 
 // --- API Route ---
-app.get("/api/dashboard/:userId", authenticateApiKey, async (req, res) => {
+app.get("/api/dashboard/:userId", async (req, res) => {
   const { userId } = req.params;
   try {
     const data = await getDashboardDataForUser(userId);
