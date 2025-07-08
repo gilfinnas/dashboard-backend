@@ -3,13 +3,15 @@ const admin = require("firebase-admin");
 
 // --- Firebase Admin SDK Initialization ---
 try {
+  // It's recommended to use environment variables for service account keys
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   admin.initializeApp({
     credential: admin.credential.cert(serviceAccount),
   });
-  console.log("Firebase Admin SDK initialized successfully.");
+  console.log("Firebase Admin SDK initialized successfully for project:", serviceAccount.project_id);
 } catch (error) {
-  console.error("CRITICAL ERROR: Could not initialize Firebase.", error);
+  console.error("CRITICAL ERROR: Could not initialize Firebase service account.", error);
+  // In a real production environment, you might want to exit if Firebase doesn't connect
   process.exit(1);
 }
 
@@ -18,44 +20,42 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.API_KEY;
 
-// --- Middlewares ---
-const corsMiddleware = (req, res, next) => {
-  const allowedOrigins = [
-    "https://dashboard-frontend-five-azure.vercel.app",
-    "https://gilfinnas.com",
-    "https://www.gilfinnas.com",
-  ];
+// --- CORS Middleware ---
+// Define the list of allowed origins for security
+const allowedOrigins = [
+  "https://dashboard-frontend-five-azure.vercel.app",
+  "https://gilfinnas.com",
+  "https://www.gilfinnas.com",
+];
+app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (allowedOrigins.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   }
-  res.header("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, x-api-key");
-  
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(200);
-  }
-
   next();
-};
+});
 
-const authMiddleware = (req, res, next) => {
+// --- API Key Authentication Middleware ---
+const authenticateApiKey = (req, res, next) => {
+  const receivedApiKey = req.header("x-api-key");
+  // If API_KEY is not set in the environment, this check is skipped.
+  // For production, ensure API_KEY is always set.
   if (!API_KEY) {
-    console.warn("API_KEY is not set. Skipping authentication.");
+    console.warn("SECURITY WARNING: API_KEY is not set. Skipping authentication.");
     return next();
   }
-  if (req.header("x-api-key") !== API_KEY) {
+  if (!receivedApiKey || receivedApiKey !== API_KEY) {
+    console.error(`Forbidden: Invalid API key received.`);
     return res.status(403).json({ error: "Forbidden: Invalid API key." });
   }
   next();
 };
 
-app.use(corsMiddleware);
-app.use(authMiddleware);
-
-// --- Data Processing Function ---
-const getDashboardDataForUser = async (userId) => {
-  console.log(`[1/5] Fetching data for userId: ${userId}`);
+// --- Data Processing Function (Now with year selection) ---
+// The function now accepts an optional 'selectedYear' parameter
+const getDashboardDataForUser = async (userId, selectedYear) => {
+  console.log(`Fetching data for userId: ${userId}, requested year: ${selectedYear || 'latest'}`);
   const userDocRef = db.collection("users").doc(userId);
   const doc = await userDocRef.get();
 
@@ -63,130 +63,134 @@ const getDashboardDataForUser = async (userId) => {
     throw new Error(`User with ID '${userId}' not found.`);
   }
 
-  console.log(`[2/5] Processing raw data...`);
   const userData = doc.data();
   const yearsData = userData.years || {};
-
-  const categoriesDefinition = {
-      "הכנסות": { key: 'income', items: ["sales_cash", "sales_credit", "sales_cheques", "sales_transfer", "sales_other"]},
-      "הכנסות פטורות ממע'מ": { key: 'income_exempt', items: ["exempt_sales_cash", "exempt_sales_credit", "exempt_sales_cheques", "exempt_sales_transfer", "exempt_sales_other"]},
-      "ספקים": { key: 'suppliers', items: ["supplier_1", "supplier_2", "supplier_3", "supplier_4", "supplier_5", "supplier_6", "supplier_7", "supplier_8", "supplier_9", "supplier_10"]},
-      "הוצאות משתנות": { key: 'variable_expenses', items: ["electricity", "water", "packaging", "marketing", "custom_var_1", "custom_var_2", "custom_var_3", "custom_var_4", "car_expenses", "phone_expenses", "partial_custom_1", "partial_custom_2"]},
-      "הלוואות": { key: 'loans', items: ["loan_1", "loan_2", "loan_3", "loan_4", "loan_5", "loan_6", "loan_7", "loan_8", "loan_9", "loan_10"]},
-      "הוצאות קבועות": { key: 'fixed_expenses', items: ["rent", "arnona", "insurance", "accounting", "communication", "software", "custom_fixed_1", "custom_fixed_2", "custom_fixed_3", "custom_fixed_4"]},
-      "משכורות ותשלומים": { key: 'salaries_and_taxes', items: ["salaries", "social_security", "income_tax", "vat_payment", "vat_field", "custom_tax_1", "custom_tax_2", "custom_tax_3", "custom_tax_4"]},
-      "בלת'מ": { key: 'misc', items: ["misc"]}
-  };
   
-  const allIncomeKeys = [...categoriesDefinition["הכנסות"].items, ...categoriesDefinition["הכנסות פטורות ממע'מ"].items];
-  const allMonthsData = [];
+  // Get a sorted list of available years (e.g., ["2026", "2025"])
+  const availableYears = Object.keys(yearsData).sort((a, b) => b.localeCompare(a));
+
+  if (availableYears.length === 0) {
+      // Handle case where there is no data at all for any year
+      return {
+          dashboardData: {
+              mainMetrics: { totalRevenue: 0, revenueChange: 0, activeUsers: 0, usersChange: 0, avgMonthlyRevenue: 0, avgChange: 0 },
+              monthlyRevenueData: [],
+              revenueByCategoryData: [],
+              recentTransactions: [],
+          },
+          availableYears: []
+      };
+  }
+
+  // Determine which year to process. Default to the latest available year if none is selected or the selected one is invalid.
+  const yearToProcess = selectedYear && yearsData[selectedYear] ? selectedYear : availableYears[0];
+  console.log(`Processing data for year: ${yearToProcess}`);
+
+  const yearData = yearsData[yearToProcess];
+
+  let totalRevenue = 0;
+  const monthlyRevenue = {}; // e.g., "יולי": 12000
+  const revenueByCategory = {}; // e.g., "מכירות (אשראי)": 5000
+  const recentTransactions = [];
+  let transactionCount = 0;
+
   const monthNames = ["ינו׳", "פבר׳", "מרץ", "אפר׳", "מאי", "יוני", "יולי", "אוג׳", "ספט׳", "אוק׳", "נוב׳", "דצמ׳"];
-  const groupMapping = {
-      'ספקים': categoriesDefinition.ספקים.items,
-      'הוצאות קבועות': categoriesDefinition['הוצאות קבועות'].items,
-      'הוצאות משתנות': categoriesDefinition['הוצאות משתנות'].items,
-      'משכורות ומיסים': categoriesDefinition['משכורות ותשלומים'].items,
-      'הלוואות': categoriesDefinition.הלוואות.items,
-      "בלת'מ": categoriesDefinition["בלת'מ"].items,
-  };
 
-  for (const year in yearsData) {
-    for (const monthIndex in yearsData[year]) {
-      const categoriesData = yearsData[year][monthIndex]?.categories || {};
-      
-      let monthTotalIncome = 0;
-      allIncomeKeys.forEach(catKey => {
-          monthTotalIncome += (categoriesData[catKey] || []).reduce((s, v) => s + (Number(v) || 0), 0);
-      });
+  // Loop through the months of the selected year
+  for (const monthIndex in yearData) {
+    const monthData = yearData[monthIndex];
+    if (!monthData) continue;
 
-      const expenseBreakdown = {};
-      let monthTotalExpense = 0;
-      Object.entries(groupMapping).forEach(([groupName, catKeys]) => {
-          const groupSum = catKeys.reduce((sum, key) => sum + (categoriesData[key] || []).reduce((s, v) => s + (Number(v) || 0), 0), 0);
-          expenseBreakdown[groupName] = groupSum;
-          monthTotalExpense += groupSum;
-      });
-      
-      allMonthsData.push({
-          year: parseInt(year),
-          month: parseInt(monthIndex),
-          name: `${monthNames[monthIndex]} ${year}`,
-          income: monthTotalIncome,
-          expense: monthTotalExpense,
-          expenseBreakdown: expenseBreakdown
-      });
-    }
-  }
+    const categories = monthData.categories || {};
+    const customNames = monthData.customNames || {};
+    
+    const monthKey = monthNames[monthIndex];
+    monthlyRevenue[monthKey] = 0;
 
-  const finalData = {
-    kpi: { ytdNetProfit: 0, monthlySalaries: 0, monthlyLoans: 0, monthlySuppliers: 0 },
-    charts: { monthlyComparison: [], monthlyExpenseComposition: [], expenseTrend: [] }
-  };
+    for (const catKey in categories) {
+      // We consider "income" type categories as revenue
+      if (catKey.includes("sales") || catKey.includes("exempt")) {
+        const dailyValues = categories[catKey] || [];
+        const categorySum = dailyValues.reduce((sum, value) => sum + (Number(value) || 0), 0);
 
-  if (allMonthsData.length === 0) {
-      console.log(`[3/5] No data found for user. Returning default empty structure.`);
-      return finalData;
-  }
+        if (categorySum > 0) {
+          totalRevenue += categorySum;
+          monthlyRevenue[monthKey] += categorySum;
 
-  allMonthsData.sort((a, b) => (a.year - b.year) || (a.month - b.month));
-  console.log(`[3/5] Sorted ${allMonthsData.length} months of data.`);
-
-  const last6MonthsData = allMonthsData.slice(-6);
-  const now = new Date();
-  const currentYear = now.getFullYear();
-  const currentMonthIndex = now.getMonth();
-
-  let ytdNetProfit = 0;
-  allMonthsData.forEach(data => {
-      if (data.year === currentYear) {
-          ytdNetProfit += data.income - data.expense;
+          const categoryName = customNames[catKey] || catKey.replace(/_/g, " ");
+          revenueByCategory[categoryName] = (revenueByCategory[categoryName] || 0) + categorySum;
+          
+          dailyValues.forEach((value, day) => {
+              if (Number(value) > 0) {
+                  transactionCount++;
+                  recentTransactions.push({
+                      id: `${yearToProcess}-${monthIndex}-${day}-${catKey}`,
+                      company: `הכנסה מ-${categoryName}`,
+                      amount: Number(value),
+                      type: "inflow",
+                      // Add a real date object for accurate sorting
+                      date: new Date(yearToProcess, monthIndex, day + 1)
+                  });
+              }
+          });
+        }
       }
-  });
-  finalData.kpi.ytdNetProfit = Math.round(ytdNetProfit);
-  
-  const currentMonthData = allMonthsData.find(d => d.year === currentYear && d.month === currentMonthIndex);
-  
-  if (currentMonthData && currentMonthData.expenseBreakdown) {
-      finalData.kpi.monthlySalaries = Math.round(currentMonthData.expenseBreakdown['משכורות ומיסים'] || 0);
-      finalData.kpi.monthlyLoans = Math.round(currentMonthData.expenseBreakdown['הלוואות'] || 0);
-      finalData.kpi.monthlySuppliers = Math.round(currentMonthData.expenseBreakdown['ספקים'] || 0);
-      
-      const categoryColors = { "ספקים": "#3b82f6", "הוצאות קבועות": "#8b5cf6", "הוצאות משתנות": "#ef4444", "משכורות ומיסים": "#f97316", "הלוואות": "#14b8a6", "בלת'מ": "#64748b" };
-      finalData.charts.monthlyExpenseComposition = Object.entries(currentMonthData.expenseBreakdown)
-        .filter(([, value]) => value > 0)
-        .sort(([, a], [, b]) => b - a)
-        .map(([name, value]) => ({ name, value, color: categoryColors[name] || "#6b7280" }));
+    }
+    // No need to delete empty months, we'll handle it in formatting
   }
-  console.log(`[4/5] Calculated KPIs.`);
-  
-  finalData.charts.monthlyComparison = last6MonthsData.map(d => ({
-    name: d.name,
-    הכנסות: d.income || 0,
-    הוצאות: d.expense || 0,
+
+  // --- Format data for Recharts ---
+  // Create a full 12-month structure for a consistent chart display
+  const fullMonthlyData = monthNames.map(name => ({
+      name,
+      revenue: monthlyRevenue[name] || 0
   }));
   
-  finalData.charts.expenseTrend = last6MonthsData.map(d => ({
-      name: d.name,
-      'ספקים': d.expenseBreakdown['ספקים'] || 0,
-      'הוצאות קבועות': d.expenseBreakdown['הוצאות קבועות'] || 0,
-      'הוצאות משתנות': d.expenseBreakdown['הוצאות משתנות'] || 0,
-      'משכורות ומיסים': d.expenseBreakdown['משכורות ומיסים'] || 0,
-      'הלוואות': d.expenseBreakdown['הלוואות'] || 0,
-      "בלת'מ": d.expenseBreakdown["בלת'מ"] || 0,
+  const categoryColors = ["#0ea5e9", "#8b5cf6", "#10b981", "#f97316", "#ef4444", "#ec4899", "#f59e0b"];
+  const revenueByCategoryData = Object.entries(revenueByCategory).map(([name, value], index) => ({
+      name,
+      value,
+      color: categoryColors[index % categoryColors.length]
   }));
-  console.log(`[5/5] Formatted chart data. Sending response.`);
+
+  // Calculate average only based on months with actual revenue
+  const revenueMonthsCount = Object.values(monthlyRevenue).filter(r => r > 0).length;
+  const avgMonthlyRevenue = revenueMonthsCount > 0 ? totalRevenue / revenueMonthsCount : 0;
+
+  // Sort all transactions by date and take the most recent 5
+  const sortedTransactions = recentTransactions.sort((a, b) => b.date - a.date).slice(0, 5);
+
+  console.log(`Processing complete for year ${yearToProcess}. Total Revenue: ${totalRevenue}`);
+
+  const dashboardData = {
+    mainMetrics: {
+      totalRevenue: Math.round(totalRevenue),
+      revenueChange: 15.2, // Placeholder
+      activeUsers: transactionCount, // Total income transactions for the year
+      usersChange: -1.5, // Placeholder
+      avgMonthlyRevenue: Math.round(avgMonthlyRevenue),
+      avgChange: 4.8, // Placeholder
+    },
+    monthlyRevenueData: fullMonthlyData,
+    revenueByCategoryData: revenueByCategoryData.length > 0 ? revenueByCategoryData : [{ name: "אין נתונים", value: 1, color: "#6b7280" }],
+    recentTransactions: sortedTransactions,
+  };
   
-  return finalData;
+  // Return both the processed data and the list of available years
+  return { dashboardData, availableYears };
 };
 
 // --- API Route ---
-app.get("/api/dashboard/:userId", async (req, res) => {
+// The route now checks for a 'year' query parameter
+app.get("/api/dashboard/:userId", authenticateApiKey, async (req, res) => {
   const { userId } = req.params;
+  const { year } = req.query; // e.g., ?year=2025
   try {
-    const data = await getDashboardDataForUser(userId);
+    // Pass the requested year to the data function
+    const data = await getDashboardDataForUser(userId, year);
     res.json(data);
   } catch (error) {
-    console.error(`API Error for userId ${userId}:`, error.message);
+    console.error(`API Error for userId ${userId} (year: ${year}):`, error.message);
     res.status(error.message.includes("not found") ? 404 : 500).json({ error: error.message });
   }
 });
