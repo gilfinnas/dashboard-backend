@@ -53,9 +53,9 @@ const authMiddleware = (req, res, next) => {
 app.use(corsMiddleware);
 app.use(authMiddleware);
 
-// --- Data Processing Function ---
-const getDashboardDataForUser = async (userId) => {
-  console.log(`[1/5] Fetching data for userId: ${userId}`);
+// --- Data Processing Function (with Year Selection) ---
+const getDashboardDataForUser = async (userId, selectedYear) => {
+  console.log(`[1/5] Fetching data for userId: ${userId}, Year: ${selectedYear || 'latest'}`);
   const userDocRef = db.collection("users").doc(userId);
   const doc = await userDocRef.get();
 
@@ -66,6 +66,13 @@ const getDashboardDataForUser = async (userId) => {
   console.log(`[2/5] Processing raw data...`);
   const userData = doc.data();
   const yearsData = userData.years || {};
+  
+  const availableYears = Object.keys(yearsData).sort((a, b) => b.localeCompare(a));
+  const yearToProcess = selectedYear && yearsData[selectedYear] ? selectedYear : availableYears[0];
+
+  if (!yearToProcess) {
+      return { dashboardData: null, availableYears: [] };
+  }
 
   const categoriesDefinition = {
       "הכנסות": { key: 'income', items: ["sales_cash", "sales_credit", "sales_cheques", "sales_transfer", "sales_other"]},
@@ -79,7 +86,6 @@ const getDashboardDataForUser = async (userId) => {
   };
   
   const allIncomeKeys = [...categoriesDefinition["הכנסות"].items, ...categoriesDefinition["הכנסות פטורות ממע'מ"].items];
-  const allMonthsData = [];
   const monthNames = ["ינו׳", "פבר׳", "מרץ", "אפר׳", "מאי", "יוני", "יולי", "אוג׳", "ספט׳", "אוק׳", "נוב׳", "דצמ׳"];
   const groupMapping = {
       'ספקים': categoriesDefinition.ספקים.items,
@@ -90,9 +96,11 @@ const getDashboardDataForUser = async (userId) => {
       "בלת'מ": categoriesDefinition["בלת'מ"].items,
   };
 
-  for (const year in yearsData) {
-    for (const monthIndex in yearsData[year]) {
-      const categoriesData = yearsData[year][monthIndex]?.categories || {};
+  const yearMonthsData = [];
+  const yearData = yearsData[yearToProcess] || {};
+
+  for (const monthIndex in yearData) {
+      const categoriesData = yearData[monthIndex]?.categories || {};
       
       let monthTotalIncome = 0;
       allIncomeKeys.forEach(catKey => {
@@ -107,83 +115,81 @@ const getDashboardDataForUser = async (userId) => {
           monthTotalExpense += groupSum;
       });
       
-      allMonthsData.push({
-          year: parseInt(year),
+      yearMonthsData.push({
           month: parseInt(monthIndex),
-          name: `${monthNames[monthIndex]} ${year}`,
+          name: `${monthNames[monthIndex]}`,
           income: monthTotalIncome,
           expense: monthTotalExpense,
           expenseBreakdown: expenseBreakdown
       });
-    }
   }
 
+  yearMonthsData.sort((a, b) => a.month - b.month);
+  console.log(`[3/5] Sorted ${yearMonthsData.length} months of data for year ${yearToProcess}.`);
+  
   const finalData = {
     kpi: { ytdNetProfit: 0, monthlySalaries: 0, monthlyLoans: 0, monthlySuppliers: 0 },
     charts: { monthlyComparison: [], monthlyExpenseComposition: [], expenseTrend: [] }
   };
 
-  if (allMonthsData.length === 0) {
-      console.log(`[3/5] No data found for user. Returning default empty structure.`);
-      return finalData;
+  if (yearMonthsData.length === 0) {
+      return { dashboardData: finalData, availableYears };
   }
+  
+  let totalYearlyNetProfit = 0;
+  let totalYearlyExpensesBreakdown = {};
+  Object.keys(groupMapping).forEach(group => totalYearlyExpensesBreakdown[group] = 0);
 
-  allMonthsData.sort((a, b) => (a.year - b.year) || (a.month - b.month));
-  console.log(`[3/5] Sorted ${allMonthsData.length} months of data.`);
-
-  const last6MonthsData = allMonthsData.slice(-6);
-  const now = new Date();
-  const currentYear = now.getFullYear();
-  const currentMonthIndex = now.getMonth();
-
-  let ytdNetProfit = 0;
-  allMonthsData.forEach(data => {
-      if (data.year === currentYear) {
-          ytdNetProfit += data.income - data.expense;
+  yearMonthsData.forEach(data => {
+      totalYearlyNetProfit += data.income - data.expense;
+      for(const group in data.expenseBreakdown) {
+          totalYearlyExpensesBreakdown[group] += data.expenseBreakdown[group];
       }
   });
-  finalData.kpi.ytdNetProfit = Math.round(ytdNetProfit);
+
+  finalData.kpi.ytdNetProfit = Math.round(totalYearlyNetProfit);
   
-  const currentMonthData = allMonthsData.find(d => d.year === currentYear && d.month === currentMonthIndex);
+  const monthsWithData = yearMonthsData.length;
+  finalData.kpi.monthlySalaries = Math.round((totalYearlyExpensesBreakdown['משכורות ומיסים'] || 0) / monthsWithData);
+  finalData.kpi.monthlyLoans = Math.round((totalYearlyExpensesBreakdown['הלוואות'] || 0) / monthsWithData);
+  finalData.kpi.monthlySuppliers = Math.round((totalYearlyExpensesBreakdown['ספקים'] || 0) / monthsWithData);
+  console.log(`[4/5] Calculated KPIs for the year.`);
+
+  const categoryColors = { "ספקים": "#3b82f6", "הוצאות קבועות": "#8b5cf6", "הוצאות משתנות": "#ef4444", "משכורות ומיסים": "#f97316", "הלוואות": "#14b8a6", "בלת'מ": "#64748b" };
+  finalData.charts.monthlyExpenseComposition = Object.entries(totalYearlyExpensesBreakdown)
+    .filter(([, value]) => value > 0)
+    .sort(([, a], [, b]) => b - a)
+    .map(([name, value]) => ({ name, value, color: categoryColors[name] || "#6b7280" }));
+
+  const fullYearComparison = monthNames.map((name, index) => {
+      const monthData = yearMonthsData.find(d => d.month === index);
+      return {
+          name: name,
+          הכנסות: monthData?.income || 0,
+          הוצאות: monthData?.expense || 0,
+      };
+  });
+  finalData.charts.monthlyComparison = fullYearComparison;
   
-  if (currentMonthData && currentMonthData.expenseBreakdown) {
-      finalData.kpi.monthlySalaries = Math.round(currentMonthData.expenseBreakdown['משכורות ומיסים'] || 0);
-      finalData.kpi.monthlyLoans = Math.round(currentMonthData.expenseBreakdown['הלוואות'] || 0);
-      finalData.kpi.monthlySuppliers = Math.round(currentMonthData.expenseBreakdown['ספקים'] || 0);
-      
-      const categoryColors = { "ספקים": "#3b82f6", "הוצאות קבועות": "#8b5cf6", "הוצאות משתנות": "#ef4444", "משכורות ומיסים": "#f97316", "הלוואות": "#14b8a6", "בלת'מ": "#64748b" };
-      finalData.charts.monthlyExpenseComposition = Object.entries(currentMonthData.expenseBreakdown)
-        .filter(([, value]) => value > 0)
-        .sort(([, a], [, b]) => b - a)
-        .map(([name, value]) => ({ name, value, color: categoryColors[name] || "#6b7280" }));
-  }
-  console.log(`[4/5] Calculated KPIs.`);
+  finalData.charts.expenseTrend = fullYearComparison.map((month, index) => {
+      const monthData = yearMonthsData.find(d => d.month === index);
+      const trendData = { name: month.name };
+      Object.keys(groupMapping).forEach(group => {
+          trendData[group] = monthData?.expenseBreakdown[group] || 0;
+      });
+      return trendData;
+  });
   
-  finalData.charts.monthlyComparison = last6MonthsData.map(d => ({
-    name: d.name,
-    הכנסות: d.income || 0,
-    הוצאות: d.expense || 0,
-  }));
-  
-  finalData.charts.expenseTrend = last6MonthsData.map(d => ({
-      name: d.name,
-      'ספקים': d.expenseBreakdown['ספקים'] || 0,
-      'הוצאות קבועות': d.expenseBreakdown['הוצאות קבועות'] || 0,
-      'הוצאות משתנות': d.expenseBreakdown['הוצאות משתנות'] || 0,
-      'משכורות ומיסים': d.expenseBreakdown['משכורות ומיסים'] || 0,
-      'הלוואות': d.expenseBreakdown['הלוואות'] || 0,
-      "בלת'מ": d.expenseBreakdown["בלת'מ"] || 0,
-  }));
   console.log(`[5/5] Formatted chart data. Sending response.`);
-  
-  return finalData;
+  return { dashboardData: finalData, availableYears };
 };
 
 // --- API Route ---
 app.get("/api/dashboard/:userId", async (req, res) => {
   const { userId } = req.params;
+  const { year } = req.query;
   try {
-    const data = await getDashboardDataForUser(userId);
+    const data = await getDashboardDataForUser(userId, year);
     res.json(data);
   } catch (error) {
     console.error(`API Error for userId ${userId}:`, error.message);
